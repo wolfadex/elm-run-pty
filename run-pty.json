@@ -1,0 +1,9 @@
+[
+  {
+    "command": ["echo", "$CARL"]
+  },
+  {
+    "title": "Steve",
+    "command": ["echo", "STEVE"]
+  }
+]
