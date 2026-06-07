@@ -472,6 +472,8 @@ type State
 type Selection
     = Invisible Int
     | ByIndicator String
+    | MouseDown Int
+    | Keyboard Int
 
 
 switchToDashboard : Stdin.WindowSize -> Cli.Env -> List Command -> Maybe Int -> Bool -> State -> Cmd Msg
@@ -561,6 +563,7 @@ drawDashboard env { commands, width, attemptedKillAll, autoExit, selection } =
                 { width = width
                 , useSeparateKilledIndicator = autoExit /= Nothing
                 }
+                |> List.map (\{ line } -> line)
                 |> String.join "\n"
     in
     -- if (done) {
@@ -621,22 +624,9 @@ drawDashboard env { commands, width, attemptedKillAll, autoExit, selection } =
     finalLines
 
 
-drawDashboardCommandLines : Cli.Env -> List Command -> Selection -> { width : Int, useSeparateKilledIndicator : Bool } -> List String
+drawDashboardCommandLines : Cli.Env -> List Command -> Selection -> { width : Int, useSeparateKilledIndicator : Bool } -> List { length : Int, line : String }
 drawDashboardCommandLines env commands selection { width, useSeparateKilledIndicator } =
     let
-        --   const lines = commands.map((command) => {
-        --     const [icon, status] = statusText(command.status, {
-        --       statusFromRules: command.statusFromRules ?? runningIndicator,
-        --       useSeparateKilledIndicator,
-        --     });
-        --     const { label = " " } = command;
-        --     return {
-        --       label: shortcut(label, { pad: false }),
-        --       icon,
-        --       status,
-        --       title: command.titlePossiblyWithGraphicRenditions,
-        --     };
-        --   });
         lines =
             List.map
                 (\command ->
@@ -708,43 +698,73 @@ drawDashboardCommandLines env commands selection { width, useSeparateKilledIndic
                         separator ++ icon
 
                 start =
-                    truncate (label ++ finalIcon) width
+                    truncateString (label ++ finalIcon) width
+
+                separatorLength =
+                    Ansi.String.width separator
+
+                startLength =
+                    Ansi.String.width (Common.removeGraphicRenditions label) + separatorLength + iconWidth
+
+                end =
+                    case status of
+                        Nothing ->
+                            title
+
+                        Just s ->
+                            String.padRight widestStatus ' ' (s ++ separator ++ title)
+
+                truncatedEnd =
+                    truncateString end (width - startLength - separatorLength)
+
+                length =
+                    startLength
+                        + separatorLength
+                        + Ansi.String.width (Common.removeGraphicRenditions truncatedEnd)
+
+                highlightedSeparator =
+                    if Just icon == selectedIndicator && not env.terminalInfo.noColor then
+                        Ansi.Color.invert " " ++ String.slice 0 1 separator
+
+                    else
+                        separator
+
+                finalEnd =
+                    case selection of
+                        MouseDown idx ->
+                            if index == idx then
+                                if env.terminalInfo.noColor then
+                                    String.slice 0 -1 highlightedSeparator ++ "→" ++ truncatedEnd
+
+                                else
+                                    highlightedSeparator ++ Ansi.Color.invert truncatedEnd
+
+                            else
+                                highlightedSeparator ++ truncatedEnd
+
+                        Keyboard idx ->
+                            if index == idx then
+                                if env.terminalInfo.noColor then
+                                    String.slice 0 -1 highlightedSeparator ++ "→" ++ truncatedEnd
+
+                                else
+                                    highlightedSeparator ++ Ansi.Color.invert truncatedEnd
+
+                            else
+                                highlightedSeparator ++ truncatedEnd
+
+                        _ ->
+                            highlightedSeparator ++ truncatedEnd
             in
-            --     const startLength =
-            --       removeGraphicRenditions(label).length + separator.length + ICON_WIDTH;
-            --     const end =
-            --       status === undefined
-            --         ? title
-            --         : `${status.padEnd(widestStatus, " ")}${separator}${title}`;
-            --     const truncatedEnd = truncate(end, width - startLength - separator.length);
-            --     const length =
-            --       startLength +
-            --       separator.length +
-            --       removeGraphicRenditions(truncatedEnd).length;
-            --     const highlightedSeparator =
-            --       icon === selectedIndicator && !NO_COLOR
-            --         ? invert(" ") + separator.slice(1)
-            --         : separator;
-            --     const finalEnd =
-            --       (selection.tag === "Mousedown" || selection.tag === "Keyboard") &&
-            --       index === selection.index
-            --         ? NO_COLOR
-            --           ? `${highlightedSeparator.slice(0, -1)}→${truncatedEnd}`
-            --           : `${highlightedSeparator}${invert(truncatedEnd)}`
-            --         : `${highlightedSeparator}${truncatedEnd}`;
-            --     return {
-            --       line: `${start}${RESET_COLOR}${cursorHorizontalAbsolute(
-            --         startLength + 1,
-            --       )}${CLEAR_RIGHT}${finalEnd}${RESET_COLOR}`,
-            --       length,
-            --     };
-            Debug.todo ""
+            { line = start ++ Common.resetColor ++ Common.cursorHorizontalAbsolute (startLength + 1) ++ Ansi.eraseLineAfter ++ finalEnd ++ Common.resetColor
+            , length = length
+            }
         )
         lines
 
 
-truncate : String -> Int -> String
-truncate string maxLength =
+truncateString : String -> Int -> String
+truncateString string maxLength =
     string
         |> Regex.split Common.graphicRenditions
         |> Extra.List.foldlOrBreak

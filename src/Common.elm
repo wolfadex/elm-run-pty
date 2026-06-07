@@ -1,5 +1,6 @@
 module Common exposing
-    ( folder
+    ( cursorHorizontalAbsolute
+    , folder
     , graphicRenditions
     , iconEmojiFix
     , keyCodes
