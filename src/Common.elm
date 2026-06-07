@@ -31,9 +31,12 @@ resetColor =
     "\\x1B[m"
 
 
+{-| -}
+supportsEmoji : Bool
 supportsEmoji =
+    -- [TODO]
     -- not IS_WINDOWS || IS_WINDOWS_TERMINAL
-    Debug.todo "supportsEmoji"
+    True
 
 
 waitingIndicator : Cli.Env -> String

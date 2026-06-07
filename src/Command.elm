@@ -3,14 +3,19 @@ module Command exposing
     , Description
     , Status(..)
     , descriptionDecoder
+    , kill
     , new
+    , pushHistory
+    , start
     , toPresentationName
+    , updateStatusFromRules
     )
 
 import Ansi.Font
 import Cli
 import Common
 import Dict exposing (Dict)
+import Env
 import Fs.Path
 import Json.Decode
 import Regex exposing (Regex)
@@ -146,6 +151,26 @@ new env opts =
     }
 
 
+start : {} -> Command -> ()
+start args command =
+    Debug.todo ""
+
+
+kill : {} -> Command -> ()
+kill args command =
+    Debug.todo ""
+
+
+pushHistory : {} -> Command -> ()
+pushHistory args command =
+    Debug.todo ""
+
+
+updateStatusFromRules : {} -> Command -> ()
+updateStatusFromRules args command =
+    Debug.todo ""
+
+
 historyStart env indicator formattedCommandWithTitle cwd =
     commandTitleWithIndicator env indicator formattedCommandWithTitle ++ "\n" ++ cwdText env cwd
 
@@ -163,7 +188,8 @@ cwdText env cwd =
         ( _, emojiWidthFix ) =
             Common.iconEmojiFix env
     in
-    if Fs.Path.fromString cwd == Debug.todo "process.cwd" then
+    -- [TODO]: This doesn't supprot Windows properly
+    if Fs.Path.fromString cwd == Fs.Path.fromString (Env.getWithDefault (Env.name "PWD") "" env) then
         ""
 
     else

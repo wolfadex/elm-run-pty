@@ -10,12 +10,15 @@ import Cli
 import Command exposing (Command)
 import Common
 import Dict exposing (Dict)
+import Env
 import Extra.List
 import Extra.String
 import Fs
 import Fs.Location
 import Fs.Path
 import Json.Decode
+import Os
+import Os.Process
 import Os.Pty
 import Regex exposing (Regex)
 import Stdin
@@ -59,38 +62,47 @@ init env =
                     )
 
                 Just stdin ->
-                    ( Initializing env fs stdin
-                    , parseArgs env fs env.args
-                        |> Task.andThen
-                            (\startTag ->
-                                case startTag of
-                                    Parsed _ _ ->
-                                        if env.terminalInfo.stdinIsTerminal then
-                                            Stdin.getWindowSize stdin
-                                                |> Task.mapError StdinError
-                                                |> Task.map (\winSize -> ( startTag, Just winSize ))
-
-                                        else
-                                            Task.succeed ( startTag, Nothing )
-
-                                    _ ->
-                                        Task.succeed ( startTag, Nothing )
+                    case Os.requireProcess env of
+                        Err _ ->
+                            ( ExitEarly
+                            , Cli.dieCmd env 1 "[TODO] requre process info"
                             )
-                        |> Task.attempt ArgsParsed
-                    )
+
+                        Ok process ->
+                            ( Initializing env fs stdin
+                            , systemInfoTask env process
+                                |> Task.andThen (\systemInfo -> parseArgs env fs systemInfo env.args)
+                                |> Task.andThen
+                                    (\startTag ->
+                                        case startTag of
+                                            Parsed _ _ ->
+                                                if env.terminalInfo.stdinIsTerminal then
+                                                    Stdin.getWindowSize stdin
+                                                        |> Task.mapError StdinError
+                                                        |> Task.map (\winSize -> ( startTag, Just winSize ))
+
+                                                else
+                                                    Task.succeed ( startTag, Nothing )
+
+                                            _ ->
+                                                Task.succeed ( startTag, Nothing )
+                                    )
+                                |> Task.attempt ArgsParsed
+                            )
 
 
 type Error
     = FsError Fs.FsError
     | StdinError Stdin.StdinError
     | JsonError Json.Decode.Error
+    | ProcessError Os.Process.ProcessError
     | Other String
     | Impossible Never
     | ExpectedFail
 
 
-parseArgs : Cli.Env -> Fs.FileSystem -> List String -> Task Error StartTag
-parseArgs env fs args =
+parseArgs : Cli.Env -> Fs.FileSystem -> SystemInfo -> List String -> Task Error StartTag
+parseArgs env fs systemInfo args =
     case args of
         [] ->
             Cli.printlnTask env.stdout helpText
@@ -102,7 +114,7 @@ parseArgs env fs args =
                 ( flags, restArgs ) =
                     partitionArgs args
             in
-            forEachFlag env flags
+            forEachFlag env systemInfo flags
                 |> Task.andThen
                     (\autoExit ->
                         parseRestArgs fs autoExit restArgs
@@ -190,8 +202,8 @@ parseInputFile autoExit config =
             Task.succeed (Parsed commands autoExit)
 
 
-forEachFlag : Cli.Env -> List String -> Task Error (Maybe Int)
-forEachFlag env flags =
+forEachFlag : Cli.Env -> SystemInfo -> List String -> Task Error (Maybe Int)
+forEachFlag env systemInfo flags =
     case flags of
         [] ->
             Task.succeed Nothing
@@ -207,10 +219,10 @@ forEachFlag env flags =
                     [ { submatches } ] ->
                         case submatches of
                             [ Nothing ] ->
-                                Task.succeed <| Just (Debug.todo "os.cpus.length")
+                                Task.succeed <| Just systemInfo.cpus
 
                             [ Just "auto" ] ->
-                                Task.succeed <| Just (Debug.todo "os.cpus.length")
+                                Task.succeed <| Just systemInfo.cpus
 
                             [ Just "0" ] ->
                                 Cli.printlnTask env.stdout "--auto-exit=0 will never finish."
@@ -236,6 +248,155 @@ forEachFlag env flags =
                         Cli.printlnTask env.stdout ("Bad flag: " ++ flag ++ "\nOnly these forms are accepted:\n" ++ autoExitHelp)
                             |> Task.mapError Impossible
                             |> Task.andThen (\_ -> Task.fail ExpectedFail)
+
+
+type alias SystemInfo =
+    { os : OS
+    , cpus : Int
+    , architecture : String
+    }
+
+
+type OS
+    = Darwin
+    | Linux
+    | Windows
+    | OtherOS String
+
+
+systemInfoTask : Cli.Env -> Os.ProcessCapability -> Task Error SystemInfo
+systemInfoTask env process =
+    Os.Process.spawn process
+        "uname"
+        { args = [ "-sm" ]
+        , cwd = Nothing
+        , env = Nothing
+        , stdin = Os.Process.NullStdin
+        , stdout =
+            Os.Process.CaptureStdout
+                { maxBytes = 1024
+                , onOverflow = Os.Process.TruncateOutput
+                }
+        , stderr = Os.Process.InheritStderr
+        }
+        |> Task.andThen (\s -> Os.Process.wait process s.pid)
+        |> Task.mapError ProcessError
+        |> Task.andThen (unixLike env process)
+        |> Task.onError (possiblyWindows env)
+
+
+unixLike : Cli.Env -> Os.ProcessCapability -> Os.Process.Completed -> Task Error SystemInfo
+unixLike env process { stdout } =
+    case stdout of
+        Nothing ->
+            Task.fail (Other "Failed to get uname")
+
+        Just uname ->
+            case String.words uname of
+                [ "Linux", arch ] ->
+                    linuxDetails process arch
+
+                [ "Darwin", arch ] ->
+                    macDetails process arch
+
+                _ ->
+                    Task.fail (Other ("Unknown OS and arch: " ++ uname))
+
+
+linuxDetails : Os.ProcessCapability -> String -> Task Error SystemInfo
+linuxDetails process arch =
+    Os.Process.spawn process
+        "nproc"
+        { args = []
+        , cwd = Nothing
+        , env = Nothing
+        , stdin = Os.Process.NullStdin
+        , stdout =
+            Os.Process.CaptureStdout
+                { maxBytes = 1024
+                , onOverflow = Os.Process.TruncateOutput
+                }
+        , stderr = Os.Process.InheritStderr
+        }
+        |> Task.andThen (\s -> Os.Process.wait process s.pid)
+        |> Task.mapError ProcessError
+        |> Task.andThen
+            (\{ stdout } ->
+                case stdout of
+                    Nothing ->
+                        Task.fail (Other "Failed to get cpu count")
+
+                    Just cpuCountStr ->
+                        case String.toInt (String.trim cpuCountStr) of
+                            Nothing ->
+                                Task.fail (Other "Unable to get CPU count - Linux")
+
+                            Just cpus ->
+                                Task.succeed
+                                    { os = Linux
+                                    , cpus = cpus
+                                    , architecture = arch
+                                    }
+            )
+
+
+macDetails : Os.ProcessCapability -> String -> Task Error SystemInfo
+macDetails process arch =
+    Os.Process.spawn process
+        "sysctl"
+        { args = [ "-n", "hw.logicalcpu" ]
+        , cwd = Nothing
+        , env = Nothing
+        , stdin = Os.Process.NullStdin
+        , stdout =
+            Os.Process.CaptureStdout
+                { maxBytes = 1024
+                , onOverflow = Os.Process.TruncateOutput
+                }
+        , stderr = Os.Process.InheritStderr
+        }
+        |> Task.andThen (\s -> Os.Process.wait process s.pid)
+        |> Task.mapError ProcessError
+        |> Task.andThen
+            (\{ stdout } ->
+                case stdout of
+                    Nothing ->
+                        Task.fail (Other "Failed to get cpu count")
+
+                    Just cpuCountStr ->
+                        case String.toInt (String.trim cpuCountStr) of
+                            Nothing ->
+                                Task.fail (Other "Unable to get CPU count - Mac")
+
+                            Just cpus ->
+                                Task.succeed
+                                    { os = Darwin
+                                    , cpus = cpus
+                                    , architecture = arch
+                                    }
+            )
+
+
+possiblyWindows : Cli.Env -> Error -> Task Error SystemInfo
+possiblyWindows env error =
+    case error of
+        ProcessError (Os.Process.ProcessError _) ->
+            case ( Env.getString (Env.name "PROCESSOR_ARCHITECTURE") env, Env.getString (Env.name "NUMBER_OF_PROCESSORS") env |> Maybe.andThen String.toInt ) of
+                ( Just arch, Just cpus ) ->
+                    Task.succeed
+                        { os = Windows
+                        , cpus = cpus
+                        , architecture = arch
+                        }
+
+                ( Nothing, _ ) ->
+                    Task.fail (Other "Unknown Windows arch")
+
+                ( _, Nothing ) ->
+                    Task.fail (Other "Unable to get CPU count - Windows")
+
+        _ ->
+            Task.fail error
 
 
 partitionArgs : List String -> ( List String, List String )
@@ -771,9 +932,11 @@ truncateString string maxLength =
             (\part ( result, index, length ) ->
                 if modBy 2 index == 0 then
                     let
+                        partLength : Int
                         partLength =
                             Ansi.String.width part
 
+                        diff : Int
                         diff =
                             maxLength - length - partLength
                     in
@@ -787,7 +950,7 @@ truncateString string maxLength =
                     Extra.List.Continue ( result ++ part, index + 1, length )
             )
             ( "", 0, 0 )
-        |> (\( res, _, _ ) -> res)
+        |> (\( res, foo, bar ) -> res)
 
 
 statusText : Cli.Env -> Command.Status -> { statusFromRules : String, useSeparateKilledIndicator : Bool } -> ( String, Maybe String )
