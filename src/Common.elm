@@ -1,5 +1,7 @@
 module Common exposing
     ( folder
+    , graphicRenditions
+    , iconEmojiFix
     , keyCodes
     , removeGraphicRenditions
     , resetColor
@@ -7,6 +9,7 @@ module Common exposing
     , waitingIndicator
     )
 
+import Cli
 import Regex exposing (Regex)
 
 
@@ -16,11 +19,13 @@ removeGraphicRenditions =
     Regex.replace graphicRenditions (\_ -> "")
 
 
+graphicRenditions : Regex
 graphicRenditions =
     Regex.fromString "(\\x1B\\[(?:\\d+(?:;\\d+)*)?m)"
         |> Maybe.withDefault Regex.never
 
 
+resetColor : String
 resetColor =
     "\\x1B[m"
 
@@ -30,6 +35,7 @@ supportsEmoji =
     Debug.todo "supportsEmoji"
 
 
+waitingIndicator : Cli.Env -> String
 waitingIndicator env =
     if env.terminalInfo.noColor then
         "■"
@@ -41,6 +47,7 @@ waitingIndicator env =
         "\\x1B[93m■" ++ resetColor
 
 
+folder : Cli.Env -> String
 folder env =
     if env.terminalInfo.noColor then
         "⌂"
@@ -50,6 +57,22 @@ folder env =
 
     else
         "\\x1B[2m⌂" ++ resetColor
+
+
+{-| ICON\_WIDTH, EMOJI\_WIDTH\_FIX
+-}
+iconEmojiFix : Cli.Env -> ( Int, String )
+iconEmojiFix env =
+    if not supportsEmoji || env.terminalInfo.noColor then
+        ( 1, "" )
+
+    else
+        ( 2, cursorHorizontalAbsolute 3 )
+
+
+cursorHorizontalAbsolute : Int -> String
+cursorHorizontalAbsolute n =
+    "\\x1B[" ++ String.fromInt n ++ "G"
 
 
 keyCodes =

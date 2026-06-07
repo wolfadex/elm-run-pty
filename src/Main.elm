@@ -4,11 +4,14 @@ import Ansi
 import Ansi.Color
 import Ansi.Cursor
 import Ansi.Font
+import Ansi.String
 import Capabilities
 import Cli
-import Command
+import Command exposing (Command)
 import Common
 import Dict exposing (Dict)
+import Extra.List
+import Extra.String
 import Fs
 import Fs.Location
 import Fs.Path
@@ -159,12 +162,12 @@ gatherCommands autoExit delimiter args =
 
                                         cmd :: rest ->
                                             Just
-                                                { title = Just (Command.toPresentationName command)
-                                                , cwd = Just "."
+                                                { title = Command.toPresentationName command
+                                                , cwd = "."
                                                 , command = ( cmd, rest )
                                                 , status = []
                                                 , defaultStatus = Nothing
-                                                , killAllSequence = Just Common.keyCodes.kill
+                                                , killAllSequence = Common.keyCodes.kill
                                                 }
                                 )
                                 commands
@@ -185,16 +188,6 @@ parseInputFile autoExit config =
 
         Ok commands ->
             Task.succeed (Parsed commands autoExit)
-
-
-type alias Command =
-    { command : ( String, List String )
-    , title : Maybe String
-    , cwd : Maybe String
-    , status : List ( Regex, String )
-    , defaultStatus : Maybe ( String, String )
-    , killAllSequence : Maybe String
-    }
 
 
 forEachFlag : Cli.Env -> List String -> Task Error (Maybe Int)
@@ -278,7 +271,7 @@ autoExitRegex =
 
 type StartTag
     = NoCommands
-    | Parsed (List Command) (Maybe Int)
+    | Parsed (List Command.Description) (Maybe Int)
 
 
 helpText : String
@@ -413,19 +406,19 @@ update msg model =
                     , Cli.exit 0
                     )
 
-                Parsed commands autoExit ->
+                Parsed commandDescriptions autoExit ->
                     if env.terminalInfo.stdinIsTerminal then
                         case windowSize of
                             Nothing ->
                                 Debug.todo ""
 
                             Just winSize ->
-                                runInteractively winSize env commands autoExit
+                                ( model, runInteractively winSize env commandDescriptions autoExit )
 
                     else
                         case autoExit of
                             Just maxParallel ->
-                                runNonInteractively commands maxParallel
+                                ( model, runNonInteractively commandDescriptions maxParallel )
 
                             Nothing ->
                                 ( ExitEarly
@@ -436,12 +429,40 @@ update msg model =
             ( model, Cmd.none )
 
 
-
--- runInteractively : List Command -> Maybe Int -> ()
-
-
-runInteractively windowSize env commands autoExit =
+runInteractively : Stdin.WindowSize -> Cli.Env -> List Command.Description -> Maybe Int -> Cmd Msg
+runInteractively windowSize env commandDescriptions autoExit =
+    let
+        commands =
+            List.indexedMap
+                (\index commandDescription ->
+                    Command.new env
+                        { label = Just (Extra.String.atIndex index allLabels)
+                        , addHistoryStart = True
+                        , commandDescription = commandDescription
+                        , onData = ()
+                        , onRequest = ()
+                        , onSynchronizedOutputChange = ()
+                        , onExit = ()
+                        }
+                )
+                commandDescriptions
+    in
     switchToDashboard windowSize env commands autoExit False (Dashboard [])
+
+
+alphabet : String
+alphabet =
+    "abcdefghijklmnopqrstuvwxyz"
+
+
+labelGroups : List String
+labelGroups =
+    [ "123456789", alphabet, String.toUpper alphabet ]
+
+
+allLabels : String
+allLabels =
+    String.concat labelGroups
 
 
 type State
@@ -450,16 +471,18 @@ type State
 
 type Selection
     = Invisible Int
+    | ByIndicator String
 
 
+switchToDashboard : Stdin.WindowSize -> Cli.Env -> List Command -> Maybe Int -> Bool -> State -> Cmd Msg
 switchToDashboard windowSize env commands autoExit forceClearScrollback state =
     let
         previousRender =
             case state of
                 Dashboard current ->
                     if
-                        (List.length current <= env.stdout.rows)
-                            && (Maybe.withDefault 0 (List.maximum (List.map String.length current)) <= env.stdout.columns)
+                        (List.length current <= windowSize.rows)
+                            && (Maybe.withDefault 0 (List.maximum (List.map Ansi.String.width current)) <= windowSize.cols)
                             && not forceClearScrollback
                     then
                         current
@@ -470,13 +493,13 @@ switchToDashboard windowSize env commands autoExit forceClearScrollback state =
         currentRender =
             drawDashboard env
                 { commands = commands
-                , width = env.stdout.columns
+                , width = windowSize.cols
                 , attemptedKillAll = False
                 , autoExit = autoExit
                 , selection = Invisible 0
                 }
                 |> String.lines
-                |> List.take env.stdout.rows
+                |> List.take windowSize.rows
 
         clear =
             if List.length previousRender == 0 then
@@ -504,21 +527,21 @@ switchToDashboard windowSize env commands autoExit forceClearScrollback state =
                         (\index line ->
                             case listAt index previousRender of
                                 Nothing ->
-                                    cursorAbsolute ( index + 1, 1 ) ++ Ansi.eraseLineAfter ++ line
+                                    cursorAbsolute (index + 1) 1 ++ Ansi.eraseLineAfter ++ line
 
                                 Just atIdx ->
                                     if atIdx == line then
                                         ""
 
                                     else
-                                        cursorAbsolute ( index + 1, 1 ) ++ Ansi.eraseLineAfter ++ line
+                                        cursorAbsolute (index + 1) 1 ++ Ansi.eraseLineAfter ++ line
                         )
                     |> String.join ""
                )
             ++ (List.range 0 (numLinesToClear - 1)
                     |> List.map
                         (\index ->
-                            cursorAbsolute (currentRender.length + index + 1) 1 ++ Ansi.eraseLineAfter
+                            cursorAbsolute (List.length currentRender + index + 1) 1 ++ Ansi.eraseLineAfter
                         )
                     |> String.join ""
                )
@@ -526,6 +549,7 @@ switchToDashboard windowSize env commands autoExit forceClearScrollback state =
         )
 
 
+drawDashboard : Cli.Env -> { commands : List Command, width : Int, attemptedKillAll : Bool, autoExit : Maybe Int, selection : Selection } -> String
 drawDashboard env { commands, width, attemptedKillAll, autoExit, selection } =
     -- const done = isDone({ commands, attemptedKillAll, autoExit });
     let
@@ -597,6 +621,7 @@ drawDashboard env { commands, width, attemptedKillAll, autoExit, selection } =
     finalLines
 
 
+drawDashboardCommandLines : Cli.Env -> List Command -> Selection -> { width : Int, useSeparateKilledIndicator : Bool } -> List String
 drawDashboardCommandLines env commands selection { width, useSeparateKilledIndicator } =
     let
         --   const lines = commands.map((command) => {
@@ -619,74 +644,133 @@ drawDashboardCommandLines env commands selection { width, useSeparateKilledIndic
                         ( icon, status ) =
                             statusText env
                                 command.status
-                                { statusFromRules = command.statusFromRules || runningIndicator
-                                , -- command.statusFromRules ?? runningIndicator,
-                                  useSeparateKilledIndicator = useSeparateKilledIndicator
+                                { statusFromRules =
+                                    case command.statusFromRules of
+                                        Just statusFromRules ->
+                                            statusFromRules
+
+                                        Nothing ->
+                                            runningIndicator env
+                                , useSeparateKilledIndicator = useSeparateKilledIndicator
                                 }
                     in
-                    { label = shortcut (Maybe.withDefault " " command.label)
+                    { label = shortcut command.label
                     , icon = icon
                     , status = status
-                    , title = titlePossiblyWithGraphicRenditions command
+                    , title = titlePossiblyWithGraphicRenditions env command
                     }
                 )
                 commands
+
+        separator =
+            "  "
+
+        widestStatus =
+            lines
+                |> List.map
+                    (\{ status } ->
+                        case status of
+                            Nothing ->
+                                0
+
+                            Just s ->
+                                Ansi.String.width s
+                    )
+                |> List.maximum
+                |> Maybe.withDefault 0
+
+        selectedIndicator =
+            case selection of
+                ByIndicator indicator ->
+                    Just indicator
+
+                _ ->
+                    Nothing
+
+        ( iconWidth, _ ) =
+            Common.iconEmojiFix env
     in
-    --   const separator = "  ";
-    --   const widestStatus = Math.max(
-    --     0,
-    --     ...lines.map(({ status }) => (status === undefined ? 0 : status.length)),
-    --   );
-    --   const selectedIndicator =
-    --     selection.tag === "ByIndicator" ? selection.indicator : undefined;
-    --   return lines.map(({ label, icon, status, title }, index) => {
-    --     const finalIcon =
-    --       icon === selectedIndicator
-    --         ? NO_COLOR
-    --           ? `${separator.slice(0, -1)}→${icon}`
-    --           : // Add spaces at the end to make sure that two terminal slots get
-    --             // inverted, no matter the actual width of the icon (which may even
-    --             // be the empty string).
-    --             `${separator.slice(0, -1)}${invert(
-    --               ` ${icon}${" ".repeat(ICON_WIDTH)}`,
-    --             )}`
-    --         : `${separator}${icon}`;
-    --     const start = truncate(`${label}${finalIcon}`, width);
-    --     const startLength =
-    --       removeGraphicRenditions(label).length + separator.length + ICON_WIDTH;
-    --     const end =
-    --       status === undefined
-    --         ? title
-    --         : `${status.padEnd(widestStatus, " ")}${separator}${title}`;
-    --     const truncatedEnd = truncate(end, width - startLength - separator.length);
-    --     const length =
-    --       startLength +
-    --       separator.length +
-    --       removeGraphicRenditions(truncatedEnd).length;
-    --     const highlightedSeparator =
-    --       icon === selectedIndicator && !NO_COLOR
-    --         ? invert(" ") + separator.slice(1)
-    --         : separator;
-    --     const finalEnd =
-    --       (selection.tag === "Mousedown" || selection.tag === "Keyboard") &&
-    --       index === selection.index
-    --         ? NO_COLOR
-    --           ? `${highlightedSeparator.slice(0, -1)}→${truncatedEnd}`
-    --           : `${highlightedSeparator}${invert(truncatedEnd)}`
-    --         : `${highlightedSeparator}${truncatedEnd}`;
-    --     return {
-    --       line: `${start}${RESET_COLOR}${cursorHorizontalAbsolute(
-    --         startLength + 1,
-    --       )}${CLEAR_RIGHT}${finalEnd}${RESET_COLOR}`,
-    --       length,
-    --     };
-    --   });
-    -- };
-    List.map
-        ()
+    List.indexedMap
+        (\index { label, icon, status, title } ->
+            let
+                finalIcon =
+                    if Just icon == selectedIndicator then
+                        if env.terminalInfo.noColor then
+                            String.slice 0 -1 separator ++ "→" ++ icon
+
+                        else
+                            -- Add spaces at the end to make sure that two terminal slots get
+                            -- inverted, no matter the actual width of the icon (which may even
+                            -- be the empty string).
+                            String.slice 0 -1 separator ++ Ansi.Color.invert (" " ++ icon ++ String.repeat iconWidth " ")
+
+                    else
+                        separator ++ icon
+
+                start =
+                    truncate (label ++ finalIcon) width
+            in
+            --     const startLength =
+            --       removeGraphicRenditions(label).length + separator.length + ICON_WIDTH;
+            --     const end =
+            --       status === undefined
+            --         ? title
+            --         : `${status.padEnd(widestStatus, " ")}${separator}${title}`;
+            --     const truncatedEnd = truncate(end, width - startLength - separator.length);
+            --     const length =
+            --       startLength +
+            --       separator.length +
+            --       removeGraphicRenditions(truncatedEnd).length;
+            --     const highlightedSeparator =
+            --       icon === selectedIndicator && !NO_COLOR
+            --         ? invert(" ") + separator.slice(1)
+            --         : separator;
+            --     const finalEnd =
+            --       (selection.tag === "Mousedown" || selection.tag === "Keyboard") &&
+            --       index === selection.index
+            --         ? NO_COLOR
+            --           ? `${highlightedSeparator.slice(0, -1)}→${truncatedEnd}`
+            --           : `${highlightedSeparator}${invert(truncatedEnd)}`
+            --         : `${highlightedSeparator}${truncatedEnd}`;
+            --     return {
+            --       line: `${start}${RESET_COLOR}${cursorHorizontalAbsolute(
+            --         startLength + 1,
+            --       )}${CLEAR_RIGHT}${finalEnd}${RESET_COLOR}`,
+            --       length,
+            --     };
+            Debug.todo ""
+        )
         lines
 
 
+truncate : String -> Int -> String
+truncate string maxLength =
+    string
+        |> Regex.split Common.graphicRenditions
+        |> Extra.List.foldlOrBreak
+            (\part ( result, index, length ) ->
+                if modBy 2 index == 0 then
+                    let
+                        partLength =
+                            Ansi.String.width part
+
+                        diff =
+                            maxLength - length - partLength
+                    in
+                    if diff < 0 then
+                        Extra.List.Break ( result ++ String.slice 0 (diff - 1) part ++ "…", index, length )
+
+                    else
+                        Extra.List.Continue ( result ++ part, index + 1, length + partLength )
+
+                else
+                    Extra.List.Continue ( result ++ part, index + 1, length )
+            )
+            ( "", 0, 0 )
+        |> (\( res, _, _ ) -> res)
+
+
+statusText : Cli.Env -> Command.Status -> { statusFromRules : String, useSeparateKilledIndicator : Bool } -> ( String, Maybe String )
 statusText env status { statusFromRules, useSeparateKilledIndicator } =
     case status of
         Command.Waiting ->
@@ -714,6 +798,7 @@ statusText env status { statusFromRules, useSeparateKilledIndicator } =
             )
 
 
+titlePossiblyWithGraphicRenditions : Cli.Env -> Command -> String
 titlePossiblyWithGraphicRenditions env command =
     if env.terminalInfo.noColor then
         Common.removeGraphicRenditions command.title
@@ -722,6 +807,7 @@ titlePossiblyWithGraphicRenditions env command =
         command.title
 
 
+runningIndicator : Cli.Env -> String
 runningIndicator env =
     if env.terminalInfo.noColor then
         "›"
@@ -733,6 +819,7 @@ runningIndicator env =
         "\\x1B[92m●" ++ Common.resetColor
 
 
+killingIndicator : Cli.Env -> String
 killingIndicator env =
     if env.terminalInfo.noColor then
         "○"
@@ -744,6 +831,7 @@ killingIndicator env =
         "\\x1B[91m○" ++ Common.resetColor
 
 
+restartingIndicator : Cli.Env -> String
 restartingIndicator env =
     if env.terminalInfo.noColor then
         "◌"
@@ -755,6 +843,7 @@ restartingIndicator env =
         "\\x1B[96m◌" ++ Common.resetColor
 
 
+abortedIndicator : Cli.Env -> String
 abortedIndicator env =
     if env.terminalInfo.noColor then
         "▲"
@@ -766,6 +855,7 @@ abortedIndicator env =
         "\\x1B[91m▲" ++ Common.resetColor
 
 
+exitIndicator : Cli.Env -> Int -> String
 exitIndicator env exitCode =
     -- 130 (128 + 2 (SIGINT)) commonly means exit by ctrl+c.
     if exitCode == 0 || exitCode == 130 then
@@ -788,31 +878,35 @@ exitIndicator env exitCode =
         "\\x1B[91m●" ++ Common.resetColor
 
 
+beginSyncUpdate : String
 beginSyncUpdate =
     "\\x1B[?2026h"
 
 
+endSyncUpdate : String
 endSyncUpdate =
     "\\x1B[?2026l"
 
 
+disableAlternateScreen : String
 disableAlternateScreen =
     "\\x1B[?1049l"
 
 
+disableApplicationCursorKeys : String
 disableApplicationCursorKeys =
     "\\x1B[?1l"
 
 
-
--- https://www.vt100.net/docs/vt510-rm/DECCKM.html
-
-
+{-| <https://www.vt100.net/docs/vt510-rm/DECCKM.html>
+-}
+enableMouse : String
 enableMouse =
     "\\x1B[?1000;1006h"
 
 
-cursorAbsolute ( y, x ) =
+cursorAbsolute : Int -> Int -> String
+cursorAbsolute y x =
     "\\x1B[" ++ String.fromInt y ++ ";" ++ String.fromInt x ++ "H"
 
 

@@ -3,6 +3,7 @@ module Command exposing
     , Description
     , Status(..)
     , descriptionDecoder
+    , new
     , toPresentationName
     )
 
@@ -152,7 +153,7 @@ historyStart env indicator formattedCommandWithTitle cwd =
 commandTitleWithIndicator env indicator formattedCommandWithTitle =
     let
         ( _, emojiWidthFix ) =
-            iconEmojiFix env
+            Common.iconEmojiFix env
     in
     indicator ++ emojiWidthFix ++ " " ++ formattedCommandWithTitle ++ Common.resetColor
 
@@ -160,28 +161,13 @@ commandTitleWithIndicator env indicator formattedCommandWithTitle =
 cwdText env cwd =
     let
         ( _, emojiWidthFix ) =
-            iconEmojiFix env
+            Common.iconEmojiFix env
     in
     if Fs.Path.fromString cwd == Debug.todo "process.cwd" then
         ""
 
     else
         Common.folder env ++ emojiWidthFix ++ " " ++ Ansi.Font.faint cwd ++ "\n"
-
-
-{-| ICON\_WIDTH, EMOJI\_WIDTH\_FIX
--}
-iconEmojiFix : Cli.Env -> ( Int, String )
-iconEmojiFix env =
-    if not Common.supportsEmoji || env.terminalInfo.noColor then
-        ( 1, "" )
-
-    else
-        ( 2, cursorHorizontalAbsolute 3 )
-
-
-cursorHorizontalAbsolute n =
-    "\\x1B[" ++ String.fromInt n ++ "G"
 
 
 extractStatus : Cli.Env -> Maybe ( String, String ) -> Maybe String
